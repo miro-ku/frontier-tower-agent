@@ -1,0 +1,16 @@
+{
+  "type": "agent",
+  "name": "Frontier Tower Concierge",
+  "description": "AI building superintendent for Frontier Tower, a 16-floor innovation hub in San Francisco. Helps residents coordinate, run polls, match resources, and manage building operations through voice and text interfaces.",
+  "image": "",
+  "active": true,
+  "services": [
+    {
+      "type": "mcp",
+      "url": "",
+      "description": "Orchestra MCP endpoint for workspace interaction"
+    }
+  ],
+  "supportedTrust": ["reputation"],
+  "registrations": []
+}
