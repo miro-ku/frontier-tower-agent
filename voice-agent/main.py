@@ -58,7 +58,7 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
     # Create Orchestra client for convenience methods
     orchestra = OrchestraClient(
         endpoint=mcp_info.get("endpoint"),
-        api_key=mcp_info.get("api_key"),
+        auth_token=mcp_info.get("auth_token"),
         space_uid=mcp_info.get("space_uid"),
         user_uid=mcp_info.get("user_uid"),
     )
@@ -335,7 +335,7 @@ async def handle_meeting_join(payload: dict[str, Any]) -> None:
 
     orchestra = OrchestraClient(
         endpoint=mcp_info.get("endpoint"),
-        api_key=mcp_info.get("api_key"),
+        auth_token=mcp_info.get("auth_token"),
         space_uid=mcp_info.get("space_uid"),
         user_uid=mcp_info.get("user_uid"),
     )
