@@ -1,12 +1,14 @@
 """
-Frontier Tower Voice Agent
+Frontier Tower Agent — External Engine Worker
 
-Receives meeting_join webhooks from Orchestra's external engine,
-joins LiveKit rooms, and runs the voice pipeline:
-Deepgram STT → Claude LLM (with Orchestra MCP tools) → ElevenLabs TTS.
+Receives triggers from Orchestra's external engine webhook.
+Handles text triggers (respond via MCP) and voice triggers (LiveKit).
 
-The agent receives full session context (instructions, history, memories)
-from Orchestra, so it shares the same "brain" as the text agent.
+Key features:
+- Uses Orchestra's MCP server for full 40+ tool access (no duplication)
+- Streams text responses into Orchestra chat (typing indicator)
+- Manages Solana wallet for building treasury operations
+- Voice calls via LiveKit (Deepgram STT + Claude LLM + ElevenLabs TTS)
 
 Usage:
     python main.py                  # Start webhook server (port 8765)
@@ -22,188 +24,303 @@ from typing import Any
 import httpx
 from aiohttp import web
 from dotenv import load_dotenv
-from livekit import api as livekit_api
-from livekit import rtc
-from livekit.agents import AgentSession, Agent, RunContext, function_tool
-from livekit.plugins import silero, anthropic, deepgram, elevenlabs
 
 from orchestra_client import OrchestraClient
+import solana_tools
 
 load_dotenv(".env.local")
 
-# Voice-specific prompt additions appended to Orchestra's instructions
 VOICE_RULES = """
 
 ## Voice Interaction Rules
 - Keep responses concise — under 3 sentences for simple questions
 - Spell out acronyms for clarity
 - Use natural pauses via punctuation
-- Confirm actions before executing (e.g., "I'll create that poll now, okay?")
+- Confirm actions before executing
 - When listing items, limit to top 3-5 and offer to share more"""
 
 
-class FrontierTowerAgent(Agent):
-    """Voice agent with Orchestra MCP tools as function calls."""
+# ---------------------------------------------------------------------------
+# Text Trigger Handler
+# ---------------------------------------------------------------------------
 
-    def __init__(self, orchestra: OrchestraClient, instructions: str = "") -> None:
-        # Append voice-specific rules to Orchestra's instructions
-        full_instructions = (instructions or "You are a helpful AI assistant.") + VOICE_RULES
-        super().__init__(instructions=full_instructions)
-        self._orchestra = orchestra
+async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
+    """Handle a text trigger: run Claude with MCP tools, stream response."""
+    agent_info = payload.get("agent", {})
+    trigger_info = payload.get("trigger", {})
+    context_info = payload.get("context", {})
+    mcp_info = payload.get("mcp", {})
 
-    @function_tool()
-    async def search_members(
-        self,
-        context: RunContext,
-        query: str | None = None,
-    ) -> str:
-        """Search for residents in the building by skills, interests, or floor.
+    origin_chat_uid = trigger_info.get("origin_chat_uid", "")
+    instructions = agent_info.get("instructions", "")
+    history = context_info.get("history", [])
 
-        Args:
-            query: Search query (e.g., "machine learning", "robotics")
-        """
-        members = await self._orchestra.get_members()
-        if isinstance(members, list):
-            if query:
-                q = query.lower()
-                members = [
-                    m for m in members
-                    if q in (m.get("name", "") + " " + (m.get("description", "") or "")).lower()
-                ]
-            return f"Found {len(members)} residents: " + ", ".join(
-                f"{m.get('name', 'Unknown')} ({m.get('description', 'No description')[:80]})"
-                for m in members[:5]
+    # Create Orchestra client for convenience methods
+    orchestra = OrchestraClient(
+        endpoint=mcp_info.get("endpoint"),
+        api_key=mcp_info.get("api_key"),
+        space_uid=mcp_info.get("space_uid"),
+        user_uid=mcp_info.get("user_uid"),
+    )
+
+    # Build messages from Orchestra's session history
+    messages = []
+    for msg in history:
+        content = msg.get("content", "")
+        if not content:
+            continue
+        is_ai = msg.get("isAiMessage", False) or msg.get("senderType") == "ai"
+        messages.append({
+            "role": "assistant" if is_ai else "user",
+            "content": content,
+        })
+
+    if not messages:
+        messages = [{"role": "user", "content": "(Scheduled trigger — no user message)"}]
+
+    # Create thinking message for streaming
+    thinking_msg = await orchestra.send_message(
+        origin_chat_uid,
+        "",
+    )
+    message_uid = thinking_msg.get("uid", "") if isinstance(thinking_msg, dict) else ""
+
+    # Define Solana tools for function calling
+    tools = [
+        {
+            "name": "check_balance",
+            "description": "Check the agent's Solana wallet SOL balance",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "transfer_sol",
+            "description": "Transfer SOL from the agent wallet to a recipient address",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "to_address": {"type": "string", "description": "Recipient Solana address"},
+                    "amount": {"type": "number", "description": "Amount in SOL"},
+                    "memo": {"type": "string", "description": "Transaction memo"},
+                },
+                "required": ["to_address", "amount"],
+            },
+        },
+        {
+            "name": "get_wallet_address",
+            "description": "Get the agent's Solana wallet public address",
+            "input_schema": {"type": "object", "properties": {}},
+        },
+    ]
+
+    # Also define key MCP tools as Anthropic function tools
+    mcp_tools = [
+        {
+            "name": "search_members",
+            "description": "Search for workspace members by name, skills, or description",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "filter": {"type": "string", "description": "Filter: members, bots, all"},
+                },
+            },
+        },
+        {
+            "name": "create_poll",
+            "description": "Create a poll in a chat for residents to vote on",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "chatUid": {"type": "string"},
+                    "question": {"type": "string"},
+                    "options": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["chatUid", "question", "options"],
+            },
+        },
+        {
+            "name": "get_poll_results",
+            "description": "Get current results of a poll",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "messageUid": {"type": "string"},
+                    "chatUid": {"type": "string"},
+                },
+                "required": ["messageUid", "chatUid"],
+            },
+        },
+        {
+            "name": "search_entities",
+            "description": "Search for tasks, projects, documents by name",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "types": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["query"],
+            },
+        },
+        {
+            "name": "create_entity",
+            "description": "Create a task, project, or document",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "entities": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string"},
+                                "name": {"type": "string"},
+                                "contextUid": {"type": "string"},
+                                "description": {"type": "string"},
+                            },
+                            "required": ["type", "name"],
+                        },
+                    },
+                },
+                "required": ["entities"],
+            },
+        },
+    ]
+
+    import anthropic
+    client = anthropic.AsyncAnthropic()
+
+    all_tools = tools + mcp_tools
+    response_text = ""
+    total_input = 0
+    total_output = 0
+    steps = 0
+
+    # Tool loop
+    current_messages = messages.copy()
+    while True:
+        steps += 1
+        response = await client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=2048,
+            system=instructions,
+            messages=current_messages,
+            tools=all_tools,
+        )
+        total_input += response.usage.input_tokens
+        total_output += response.usage.output_tokens
+
+        # Check for tool calls
+        tool_uses = [b for b in response.content if b.type == "tool_use"]
+        text_blocks = [b for b in response.content if b.type == "text"]
+
+        if text_blocks:
+            response_text = text_blocks[-1].text
+
+        if not tool_uses or response.stop_reason == "end_turn":
+            break
+
+        # Execute tool calls
+        current_messages.append({"role": "assistant", "content": response.content})
+        tool_results = []
+
+        for tool_use in tool_uses:
+            result = await execute_tool(tool_use.name, tool_use.input, orchestra)
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tool_use.id,
+                "content": str(result),
+            })
+
+        current_messages.append({"role": "user", "content": tool_results})
+
+        # Stream intermediate text if available
+        if message_uid and response_text:
+            try:
+                await orchestra.call_tool("update_ai_message", {
+                    "chatUid": origin_chat_uid,
+                    "messageUid": message_uid,
+                    "content": response_text,
+                    "isGenerating": True,
+                })
+            except Exception as e:
+                print(f"[text] Streaming update failed: {e}")
+
+        if steps >= 15:
+            break
+
+    # Final update — stop generating indicator
+    if message_uid and response_text:
+        try:
+            await orchestra.call_tool("update_ai_message", {
+                "chatUid": origin_chat_uid,
+                "messageUid": message_uid,
+                "content": response_text,
+                "isGenerating": False,
+            })
+        except Exception as e:
+            print(f"[text] Final update failed: {e}")
+
+    return {
+        "success": True,
+        "stepsCount": steps,
+        "tokensInput": total_input,
+        "tokensOutput": total_output,
+        "responseText": response_text,
+    }
+
+
+async def execute_tool(name: str, args: dict[str, Any], orchestra: OrchestraClient) -> str:
+    """Execute a tool call — routes to Solana tools or Orchestra MCP."""
+    try:
+        # Solana tools (local)
+        if name == "check_balance":
+            return await solana_tools.check_balance()
+        elif name == "transfer_sol":
+            return await solana_tools.transfer_sol(
+                args["to_address"], args["amount"], args.get("memo", "")
             )
-        return str(members)
+        elif name == "get_wallet_address":
+            return await solana_tools.get_wallet_address()
+        # MCP tools (proxied to Orchestra)
+        elif name == "search_members":
+            return str(await orchestra.get_members(**args))
+        elif name == "create_poll":
+            return str(await orchestra.create_poll(
+                args["chatUid"], args["question"], args["options"]
+            ))
+        elif name == "get_poll_results":
+            return str(await orchestra.get_poll_results(
+                args["messageUid"], args["chatUid"]
+            ))
+        elif name == "search_entities":
+            return str(await orchestra.search_entities(
+                args["query"], args.get("types")
+            ))
+        elif name == "create_entity":
+            return str(await orchestra.create_entity(args["entities"]))
+        else:
+            # Try calling as generic MCP tool
+            return str(await orchestra.call_tool(name, args))
+    except Exception as e:
+        return f"Tool error: {e}"
 
-    @function_tool()
-    async def create_poll(
-        self,
-        context: RunContext,
-        chat_uid: str,
-        question: str,
-        options: list[str],
-    ) -> str:
-        """Create a poll for residents to vote on.
 
-        Args:
-            chat_uid: UID of the channel to create the poll in
-            question: The poll question
-            options: List of options to vote on (2-10 choices)
-        """
-        await self._orchestra.create_poll(chat_uid, question, options)
-        return f"Poll created: '{question}' with {len(options)} options"
-
-    @function_tool()
-    async def get_poll_results(
-        self,
-        context: RunContext,
-        message_uid: str,
-        chat_uid: str,
-    ) -> str:
-        """Get the current results of a poll.
-
-        Args:
-            message_uid: UID of the poll message
-            chat_uid: UID of the chat containing the poll
-        """
-        result = await self._orchestra.get_poll_results(message_uid, chat_uid)
-        return str(result)
-
-    @function_tool()
-    async def send_announcement(
-        self,
-        context: RunContext,
-        chat_uid: str,
-        message: str,
-    ) -> str:
-        """Send an announcement to a building channel.
-
-        Args:
-            chat_uid: UID of the channel to post in
-            message: The announcement message (supports markdown)
-        """
-        await self._orchestra.send_message(chat_uid, message)
-        return "Announcement sent successfully"
-
-    @function_tool()
-    async def create_task(
-        self,
-        context: RunContext,
-        name: str,
-        context_uid: str | None = None,
-        description: str | None = None,
-        assignee_uid: str | None = None,
-    ) -> str:
-        """Create a task (maintenance request, event, bounty).
-
-        Args:
-            name: Task title
-            context_uid: Project/floor UID to create the task in
-            description: Task description
-            assignee_uid: UID of the member to assign to
-        """
-        entity: dict[str, Any] = {"type": "task", "name": name}
-        if context_uid:
-            entity["contextUid"] = context_uid
-        if description:
-            entity["description"] = description
-        if assignee_uid:
-            entity["assigneeUid"] = assignee_uid
-
-        await self._orchestra.create_entity([entity])
-        return f"Task '{name}' created"
-
-    @function_tool()
-    async def search_building(
-        self,
-        context: RunContext,
-        query: str,
-        entity_type: str = "task",
-    ) -> str:
-        """Search for tasks, projects, or documents in the building workspace.
-
-        Args:
-            query: Search query
-            entity_type: Type to search for (task, project, document, channel)
-        """
-        result = await self._orchestra.search_entities(query, [entity_type])
-        if isinstance(result, list):
-            return f"Found {len(result)} results: " + ", ".join(
-                r.get("name", "Unknown") for r in result[:5]
-            )
-        return str(result)
-
-    @function_tool()
-    async def read_messages(
-        self,
-        context: RunContext,
-        chat_uid: str,
-        limit: int = 10,
-    ) -> str:
-        """Read recent messages from a chat or channel.
-
-        Args:
-            chat_uid: UID of the chat to read from
-            limit: Number of messages to return (default: 10)
-        """
-        result = await self._orchestra.read_messages(chat_uid, limit)
-        if isinstance(result, list):
-            lines = []
-            for msg in result:
-                sender = msg.get("senderName", "Unknown")
-                content = msg.get("content", "")[:100]
-                lines.append(f"{sender}: {content}")
-            return "\n".join(lines) if lines else "No messages found"
-        return str(result)
-
+# ---------------------------------------------------------------------------
+# Voice Trigger Handler
+# ---------------------------------------------------------------------------
 
 async def handle_meeting_join(payload: dict[str, Any]) -> None:
     """Handle a meeting_join trigger by joining the LiveKit room."""
+    from livekit import api as livekit_api
+    from livekit import rtc
+    from livekit.agents import AgentSession, Agent, RunContext, function_tool
+    from livekit.plugins import silero, anthropic as anthropic_lk, deepgram, elevenlabs
+
     agent_info = payload.get("agent", {})
     trigger_info = payload.get("trigger", {})
     workspace_info = payload.get("workspace", {})
     context_info = payload.get("context", {})
+    mcp_info = payload.get("mcp", {})
 
     room_name = trigger_info.get("room_name") or trigger_info.get("origin_chat_uid", "")
     agent_member_uid = agent_info.get("member_uid", "")
@@ -211,18 +328,19 @@ async def handle_meeting_join(payload: dict[str, Any]) -> None:
     history = context_info.get("history", [])
 
     if not room_name:
-        print("[voice] No room name in webhook payload, skipping")
+        print("[voice] No room name, skipping")
         return
 
-    print(f"[voice] Joining room: {room_name} as agent: {agent_member_uid}")
+    print(f"[voice] Joining room: {room_name}")
 
-    # Create Orchestra client scoped to this agent
     orchestra = OrchestraClient(
-        space_uid=workspace_info.get("uid"),
-        user_uid=agent_member_uid,
+        endpoint=mcp_info.get("endpoint"),
+        api_key=mcp_info.get("api_key"),
+        space_uid=mcp_info.get("space_uid"),
+        user_uid=mcp_info.get("user_uid"),
     )
 
-    # Get LiveKit token for the agent
+    # Generate LiveKit token
     livekit_url = os.environ.get("LIVEKIT_URL", "")
     livekit_api_key = os.environ.get("LIVEKIT_API_KEY", "")
     livekit_api_secret = os.environ.get("LIVEKIT_API_SECRET", "")
@@ -231,65 +349,87 @@ async def handle_meeting_join(payload: dict[str, Any]) -> None:
         livekit_api.AccessToken(livekit_api_key, livekit_api_secret)
         .with_identity(f"agent-{agent_member_uid}")
         .with_name("Frontier Tower Concierge")
-        .with_grants(
-            livekit_api.VideoGrants(
-                room_join=True,
-                room=room_name,
-                can_publish=True,
-                can_subscribe=True,
-            )
-        )
+        .with_grants(livekit_api.VideoGrants(
+            room_join=True, room=room_name,
+            can_publish=True, can_subscribe=True,
+        ))
     )
-    jwt_token = token.to_jwt()
 
-    # Build initial chat context from Orchestra's session history
-    chat_context = anthropic.llm.ChatContext()
+    # Build chat context from history
+    chat_ctx = anthropic_lk.llm.ChatContext()
     for msg in history:
         content = msg.get("content", "")
         if not content:
             continue
-        sender_type = msg.get("senderType", "")
-        is_ai = msg.get("isAiMessage", False) or sender_type == "ai"
-        if is_ai:
-            chat_context = chat_context.append(role="assistant", text=content)
-        else:
-            chat_context = chat_context.append(role="user", text=content)
+        is_ai = msg.get("isAiMessage", False) or msg.get("senderType") == "ai"
+        chat_ctx = chat_ctx.append(
+            role="assistant" if is_ai else "user",
+            text=content,
+        )
 
-    # Create the voice session
+    # Create voice agent with tools
+    class VoiceAgent(Agent):
+        def __init__(self):
+            super().__init__(instructions=instructions + VOICE_RULES)
+
+        @function_tool()
+        async def search_members(self, ctx: RunContext, query: str = "") -> str:
+            """Search residents by skills or interests."""
+            members = await orchestra.get_members()
+            if isinstance(members, list) and query:
+                q = query.lower()
+                members = [m for m in members
+                    if q in (m.get("name","") + " " + (m.get("description","") or "")).lower()]
+            if isinstance(members, list):
+                return ", ".join(f"{m.get('name','?')}" for m in members[:5])
+            return str(members)
+
+        @function_tool()
+        async def create_poll(self, ctx: RunContext, chat_uid: str, question: str, options: list[str]) -> str:
+            """Create a poll for residents to vote on."""
+            await orchestra.create_poll(chat_uid, question, options)
+            return f"Poll created: {question}"
+
+        @function_tool()
+        async def check_balance(self, ctx: RunContext) -> str:
+            """Check building treasury balance."""
+            return await solana_tools.check_balance()
+
+        @function_tool()
+        async def transfer_sol(self, ctx: RunContext, to_address: str, amount: float, memo: str = "") -> str:
+            """Transfer SOL from the building treasury."""
+            return await solana_tools.transfer_sol(to_address, amount, memo)
+
     session = AgentSession(
         stt=deepgram.STT(model="nova-3", language="en"),
-        llm=anthropic.LLM(model="claude-sonnet-4-20250514", temperature=0.8),
+        llm=anthropic_lk.LLM(model="claude-sonnet-4-20250514", temperature=0.8),
         tts=elevenlabs.TTS(
             voice_id=os.environ.get("ELEVENLABS_VOICE_ID", "ODq5zmih8GrVes37Dizd"),
             model="eleven_turbo_v2_5",
         ),
         vad=silero.VAD.load(),
-        chat_ctx=chat_context,
+        chat_ctx=chat_ctx,
     )
 
-    # Connect to the LiveKit room
     room = rtc.Room()
-    await room.connect(livekit_url, jwt_token)
+    await room.connect(livekit_url, token.to_jwt())
 
-    print(f"[voice] Connected to room: {room_name}")
-
-    # Start the voice agent
-    agent = FrontierTowerAgent(orchestra=orchestra, instructions=instructions)
-
-    await session.start(room=room, agent=agent)
+    await session.start(room=room, agent=VoiceAgent())
     await session.generate_reply(
-        instructions="Greet the resident warmly. Introduce yourself as the Frontier Tower concierge and ask how you can help today."
+        instructions="Greet the resident warmly as the Frontier Tower concierge."
     )
 
-    print(f"[voice] Agent session started in room: {room_name}")
+    print(f"[voice] Session started in room: {room_name}")
 
-    # Keep running until room disconnects
     disconnect_event = asyncio.Event()
     room.on("disconnected", lambda: disconnect_event.set())
-
     await disconnect_event.wait()
     print(f"[voice] Disconnected from room: {room_name}")
 
+
+# ---------------------------------------------------------------------------
+# Webhook Server
+# ---------------------------------------------------------------------------
 
 async def handle_webhook(request: web.Request) -> web.Response:
     """Handle incoming webhook from Orchestra's external engine."""
@@ -302,35 +442,28 @@ async def handle_webhook(request: web.Request) -> web.Response:
         return web.json_response({"error": "Unknown event"}, status=400)
 
     trigger_type = payload.get("trigger", {}).get("type", "unknown")
+    print(f"[webhook] Received trigger: {trigger_type}")
 
-    if trigger_type != "meeting_join":
-        return web.json_response({
-            "error": f"Unsupported trigger type: {trigger_type}. Only meeting_join is handled."
-        }, status=400)
-
-    # Handle meeting_join asynchronously — return 200 immediately
-    asyncio.create_task(handle_meeting_join(payload))
-
-    return web.json_response({
-        "success": True,
-        "stepsCount": 0,
-        "tokensInput": 0,
-        "tokensOutput": 0,
-    })
-
-
-def create_app() -> web.Application:
-    app = web.Application()
-    app.router.add_post("/webhook", handle_webhook)
-    app.router.add_get("/health", lambda _: web.json_response({"status": "ok"}))
-    return app
+    if trigger_type == "meeting_join":
+        asyncio.create_task(handle_meeting_join(payload))
+        return web.json_response({"success": True, "stepsCount": 0, "tokensInput": 0, "tokensOutput": 0})
+    elif trigger_type in ("mention", "message_in_chat", "message_in_project", "schedule", "personal_chat", "reply"):
+        result = await handle_text_trigger(payload)
+        return web.json_response(result)
+    else:
+        return web.json_response({"error": f"Unsupported trigger: {trigger_type}"}, status=400)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Frontier Tower Voice Agent")
+    parser = argparse.ArgumentParser(description="Frontier Tower Agent — External Engine Worker")
     parser.add_argument("--port", type=int, default=int(os.environ.get("WEBHOOK_PORT", "8765")))
     args = parser.parse_args()
 
-    print(f"[voice] Starting Frontier Tower voice agent on port {args.port}")
-    print(f"[voice] Waiting for meeting_join webhooks from Orchestra...")
-    web.run_app(create_app(), port=args.port)
+    app = web.Application()
+    app.router.add_post("/webhook", handle_webhook)
+    app.router.add_get("/health", lambda _: web.json_response({"status": "ok"}))
+
+    print(f"[agent] Frontier Tower Agent starting on port {args.port}")
+    print(f"[agent] Handles: text triggers (streaming) + voice calls (LiveKit)")
+    print(f"[agent] Solana wallet: enabled" if os.environ.get("SOLANA_PRIVATE_KEY") or os.environ.get("SOLANA_KEYPAIR_PATH") else "[agent] Solana wallet: not configured")
+    web.run_app(app, port=args.port)
