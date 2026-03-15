@@ -330,16 +330,21 @@ async def handle_meeting_join(payload: dict[str, Any]) -> None:
             role = "assistant"
         chat_ctx.add_message(role=role, content=content)
 
+    # Create aiohttp session for plugins (required outside LiveKit worker context)
+    import aiohttp
+    http_session = aiohttp.ClientSession()
+
     # Create voice agent with tools
     class VoiceAgent(Agent):
         def __init__(self):
             super().__init__(
                 instructions=instructions + VOICE_RULES,
-                stt=elevenlabs.STT(),
+                stt=elevenlabs.STT(http_session=http_session),
                 llm=anthropic_lk.LLM(model="claude-sonnet-4-20250514", temperature=0.8),
                 tts=elevenlabs.TTS(
                     voice_id=os.environ.get("ELEVENLABS_VOICE_ID", "ODq5zmih8GrVes37Dizd"),
                     model="eleven_turbo_v2_5",
+                    http_session=http_session,
                 ),
                 vad=silero.VAD.load(),
                 chat_ctx=chat_ctx,
@@ -388,6 +393,7 @@ async def handle_meeting_join(payload: dict[str, Any]) -> None:
     disconnect_event = asyncio.Event()
     room.on("disconnected", lambda: disconnect_event.set())
     await disconnect_event.wait()
+    await http_session.close()
     print(f"[voice] Disconnected from room: {room_name}")
 
 
