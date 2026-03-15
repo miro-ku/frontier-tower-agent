@@ -6,9 +6,9 @@
   "active": true,
   "services": [
     {
-      "type": "mcp",
-      "url": "https://testing-mcpserver-r6qvke55xq-uc.a.run.app",
-      "description": "Orchestra MCP endpoint for workspace interaction"
+      "type": "webhook",
+      "url": "https://voice-agent-production-52d0.up.railway.app/webhook",
+      "description": "External engine webhook — send trigger payloads to interact with the agent"
     }
   ],
   "supportedTrust": ["reputation"],

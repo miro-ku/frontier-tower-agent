@@ -26,6 +26,7 @@ from aiohttp import web
 from dotenv import load_dotenv
 
 from orchestra_client import OrchestraClient
+from unbrowse_client import UnbrowseClient
 import solana_tools
 
 load_dotenv(".env.local")
@@ -100,6 +101,16 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
             {"name": "get_wallet_address", "description": "Get the building treasury wallet address", "input_schema": {"type": "object", "properties": {}}},
         ])
 
+    # Add Unbrowse tools (web abilities via MCP subprocess)
+    unbrowse = UnbrowseClient()
+    try:
+        if await unbrowse.start():
+            unbrowse_tools = await unbrowse.list_tools()
+            tools.extend(unbrowse_tools)
+            print(f"[text] Discovered {len(unbrowse_tools)} Unbrowse tools")
+    except Exception as e:
+        print(f"[text] Failed to start Unbrowse: {e}")
+
     # Tool loop with streaming
     response_text = ""
     total_input = 0
@@ -141,7 +152,7 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
 
         for tool_use in tool_uses:
             try:
-                result = await execute_tool(tool_use.name, tool_use.input, orchestra)
+                result = await execute_tool(tool_use.name, tool_use.input, orchestra, unbrowse)
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_use.id,
@@ -190,7 +201,7 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
                 current_messages.append({"role": "assistant", "content": final.content})
                 for tool_use in tool_uses:
                     try:
-                        result = await execute_tool(tool_use.name, tool_use.input, orchestra)
+                        result = await execute_tool(tool_use.name, tool_use.input, orchestra, unbrowse)
                         current_messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use.id, "content": json.dumps(result) if not isinstance(result, str) else result}]})
                     except Exception as e:
                         current_messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use.id, "content": f"Tool error: {e}", "is_error": True}]})
@@ -210,6 +221,9 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
                 yield json.dumps({"type": "chunk", "text": response_text}) + "\n"
 
     # Yield final result
+    # Cleanup Unbrowse subprocess
+    await unbrowse.stop()
+
     yield json.dumps({
         "type": "result",
         "success": True,
@@ -220,8 +234,11 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
     }) + "\n"
 
 
-async def execute_tool(name: str, args: dict[str, Any], orchestra: OrchestraClient) -> Any:
-    """Execute a tool call — routes Solana tools locally, everything else to MCP."""
+async def execute_tool(name: str, args: dict[str, Any], orchestra: OrchestraClient, unbrowse: UnbrowseClient | None = None) -> Any:
+    """Execute a tool call — routes Solana locally, Unbrowse via subprocess, rest to Orchestra MCP."""
+    # Unbrowse tools (via MCP subprocess)
+    if name.startswith("unbrowse_") and unbrowse:
+        return await unbrowse.call_tool(name, args)
     # Solana tools (local)
     if name == "check_balance":
         return await solana_tools.check_balance()
