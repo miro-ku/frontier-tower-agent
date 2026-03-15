@@ -7,7 +7,7 @@
   "services": [
     {
       "type": "mcp",
-      "url": "",
+      "url": "https://testing-mcpserver-r6qvke55xq-uc.a.run.app",
       "description": "Orchestra MCP endpoint for workspace interaction"
     }
   ],

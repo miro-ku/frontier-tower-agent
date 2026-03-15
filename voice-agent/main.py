@@ -52,7 +52,8 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
     mcp_info = payload.get("mcp", {})
 
     origin_chat_uid = trigger_info.get("origin_chat_uid", "")
-    instructions = agent_info.get("instructions", "")
+    system_prompt = agent_info.get("system_prompt", "")
+    user_instructions = agent_info.get("user_instructions", "")
     history = context_info.get("history", [])
 
     # Create Orchestra client for convenience methods
@@ -104,7 +105,11 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
     total_input = 0
     total_output = 0
     steps = 0
-    current_messages = messages.copy()
+    # Inject user instructions as first user message (sandboxed, same as Orchestra engine)
+    current_messages = []
+    if user_instructions:
+        current_messages.append({"role": "user", "content": user_instructions})
+    current_messages.extend(messages)
 
     while steps < 15:
         steps += 1
@@ -113,7 +118,7 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
         response = await client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=2048,
-            system=instructions,
+            system=system_prompt,
             messages=current_messages,
             tools=tools if mcp_info.get("endpoint") else [],
         )
@@ -166,7 +171,7 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
         async with client.messages.stream(
             model="claude-sonnet-4-20250514",
             max_tokens=2048,
-            system=instructions,
+            system=system_prompt,
             messages=current_messages,
             tools=tools if mcp_info.get("endpoint") else [],
         ) as stream:
@@ -194,7 +199,7 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
                 final_resp = await client.messages.create(
                     model="claude-sonnet-4-20250514",
                     max_tokens=2048,
-                    system=instructions,
+                    system=system_prompt,
                     messages=current_messages,
                 )
                 total_input += final_resp.usage.input_tokens
@@ -240,7 +245,7 @@ async def handle_meeting_join(payload: dict[str, Any]) -> None:
     from livekit import api as livekit_api
     from livekit import rtc
     from livekit.agents import AgentSession, Agent, RunContext, function_tool
-    from livekit.plugins import silero, anthropic as anthropic_lk, deepgram, elevenlabs
+    from livekit.plugins import silero, anthropic as anthropic_lk, elevenlabs
 
     agent_info = payload.get("agent", {})
     trigger_info = payload.get("trigger", {})
@@ -250,6 +255,7 @@ async def handle_meeting_join(payload: dict[str, Any]) -> None:
 
     room_name = trigger_info.get("room_name") or trigger_info.get("origin_chat_uid", "")
     agent_member_uid = agent_info.get("member_uid", "")
+    # Voice uses blueprint instructions (concise) + voice rules, not the full system prompt
     instructions = agent_info.get("instructions", "")
     history = context_info.get("history", [])
 
@@ -327,7 +333,7 @@ async def handle_meeting_join(payload: dict[str, Any]) -> None:
             return await solana_tools.transfer_sol(to_address, amount, memo)
 
     session = AgentSession(
-        stt=deepgram.STT(model="nova-3", language="en"),
+        stt=elevenlabs.STT(),
         llm=anthropic_lk.LLM(model="claude-sonnet-4-20250514", temperature=0.8),
         tts=elevenlabs.TTS(
             voice_id=os.environ.get("ELEVENLABS_VOICE_ID", "ODq5zmih8GrVes37Dizd"),
@@ -402,7 +408,7 @@ async def handle_webhook(request: web.Request) -> web.Response:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Frontier Tower Agent — External Engine Worker")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("WEBHOOK_PORT", "8765")))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", os.environ.get("WEBHOOK_PORT", "8765"))))
     args = parser.parse_args()
 
     app = web.Application()

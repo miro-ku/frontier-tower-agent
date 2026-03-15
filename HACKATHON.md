@@ -108,14 +108,63 @@ Orchestra provides:              Voice Worker provides:
 
 ## How to Run
 
-### Voice Agent Worker
+### Voice Agent Worker (local)
 ```bash
 cd voice-agent
 pip install -r requirements.txt
 cp .env.example .env.local
-# Fill in: LIVEKIT_*, ANTHROPIC_API_KEY, DEEPGRAM_API_KEY, ELEVEN_API_KEY
+# Fill in: ANTHROPIC_API_KEY, ELEVEN_API_KEY (used for both STT and TTS)
+# LIVEKIT_* keys (for voice calls)
 # MCP credentials come from Orchestra webhook payload (auto)
 python main.py
+```
+
+### Voice Agent Worker (Railway deployment)
+```bash
+# Install Railway CLI: brew install railway
+railway login
+railway init --name frontier-tower-agent
+railway add -s voice-agent
+railway service voice-agent
+
+# Set env vars
+railway variables set \
+  ANTHROPIC_API_KEY=sk-ant-... \
+  ELEVEN_API_KEY=sk_... \
+  LIVEKIT_URL=wss://your-livekit.livekit.cloud \
+  LIVEKIT_API_KEY=... \
+  LIVEKIT_API_SECRET=... \
+  ELEVENLABS_VOICE_ID=ODq5zmih8GrVes37Dizd \
+  SOLANA_RPC_URL=https://api.devnet.solana.com \
+  SOLANA_PRIVATE_KEY='[...keypair bytes...]'
+
+# Deploy (from voice-agent/ directory)
+cd voice-agent
+railway up
+
+# Get the public URL
+railway domain
+# → https://your-app.up.railway.app
+# Webhook URL: https://your-app.up.railway.app/webhook
+```
+
+### Solana Wallet Setup
+```bash
+# 1. Generate a keypair (or use existing)
+python3 -c "
+from solders.keypair import Keypair
+import json
+kp = Keypair()
+print('Address:', kp.pubkey())
+print('Key JSON:', json.dumps(list(bytes(kp))))
+"
+
+# 2. Fund with devnet SOL
+#    Go to https://faucet.solana.com
+#    Paste the address, select Devnet, request 5 SOL
+
+# 3. Set the key on Railway (or in .env.local for local dev)
+railway variables set SOLANA_PRIVATE_KEY='[...the key JSON array...]'
 ```
 
 ### Metaplex Registration
@@ -128,8 +177,8 @@ AGENT_REGISTRATION_URI=https://arweave.net/... npm run register
 
 ### Orchestra Agent Setup
 1. Create agent blueprint in Orchestra
-2. Set engine to "External", enter webhook URL
-3. Set voice engine to "External", enter voice webhook URL
+2. Set engine to "External", webhook URL: `https://your-app.up.railway.app/webhook`
+3. Set voice engine to "External", same webhook URL
 4. Enable triggers: mention, Voice Call
 5. Deploy the agent
 

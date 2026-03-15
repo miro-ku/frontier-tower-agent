@@ -1,89 +1,103 @@
 # Demo Script
 
-Five scenarios demonstrating the Frontier Tower Agent's capabilities. Total demo time: ~6 minutes.
+Five scenarios demonstrating the Frontier Tower Agent. Total: ~5 minutes.
+
+**Prerequisites**:
+- Agent deployed on Railway with webhook URL set in Orchestra blueprint
+- Demo workspace with floor projects, channels, sample residents with descriptions
+- Agent blueprint configured: external engine, voice engine, mention + voice call triggers
+- Solana wallet funded with devnet SOL (optional, for scenario 5)
 
 ---
 
-## Scenario 1: Voice Onboarding (~2 min)
+## Scenario 1: Text — Resource Matching (~1.5 min)
 
-**Setup**: Join a LiveKit room where the voice agent is active.
+**Where**: @mention agent in a project or channel chat
 
-**Script**:
-1. Agent greets: *"Hey! Welcome to Frontier Tower. I'm your building concierge. How can I help?"*
-2. Say: *"Hi, I just moved in. I'm on floor 7 and I work in robotics."*
-3. Agent responds, asks about specific interests
-4. Say: *"I'm interested in humanoid robots and computer vision."*
-5. Agent:
-   - Searches member profiles for robotics/CV residents
-   - Introduces 2-3 matches: *"There are a few people you should meet — Alex on floor 3 works on manipulation systems, and Sarah on floor 12 does computer vision research."*
-   - Offers to add to relevant channels
-6. Say: *"Yes, add me to the events channel."*
-7. **Show**: Orchestra UI updating in real-time — member added to channel
+1. Type: `@Concierge I need someone who knows about machine learning for a project`
+2. Wait for agent response — it will:
+   - Call `get_members` via MCP to search workspace members
+   - Match based on member descriptions/profiles
+   - Respond with 2-3 matches and their backgrounds
+3. Type: `Can you introduce me to [name]?`
+4. Agent sends a DM to that person with introduction via `send_message`
 
-**Demonstrates**: Voice interaction, member search, resource matching, channel management
+**What judges see**: Agent discovers tools dynamically from MCP, searches real workspace data, sends cross-chat messages.
 
 ---
 
-## Scenario 2: Building Poll (~1 min)
+## Scenario 2: Text — Building Poll (~1 min)
 
-**Script** (text or voice):
-1. Say/type: *"Can we run a poll about the new common area furniture? Options: modern minimalist, cozy lounge, and standing desks."*
-2. Agent confirms and creates poll
-3. **Show**: Orchestra UI — poll message appears in the channel with three options
-4. **Click**: Vote on an option in the UI
-5. Say: *"What are the poll results so far?"*
-6. Agent reads and announces current tally
+**Where**: Same chat or a channel
 
-**Demonstrates**: Poll creation, UI rendering, voting, results retrieval
+1. Type: `@Concierge Let's vote on common area furniture. Options: modern minimalist, cozy lounge, standing desks`
+2. Agent calls `create_poll` via MCP
+3. **Show**: Poll appears in the chat with clickable vote buttons
+4. Click to vote on an option
+5. Type: `@Concierge What are the results?`
+6. Agent calls `get_poll_results`, reads back the tally
 
----
-
-## Scenario 3: Resource Matching (~1 min)
-
-**Script**:
-1. Say: *"I need someone who knows about machine learning for a project I'm working on."*
-2. Agent searches member profiles
-3. Agent responds: *"I found 3 residents with ML expertise — Jordan on floor 4 specializes in reinforcement learning, Pat on floor 9 does NLP, and Chris on floor 2 works on generative models. Want me to introduce you to any of them?"*
-4. Say: *"Introduce me to Jordan."*
-5. Agent sends a DM to Jordan with the introduction
-
-**Demonstrates**: Member profile search, cross-floor matching, DM capability
+**What judges see**: Custom poll UI rendered in Orchestra, atomic voting, real-time results.
 
 ---
 
-## Scenario 4: Daily Digest (scheduled, ~1 min)
+## Scenario 3: Voice — Onboarding Call (~2 min)
 
-**Show**: A pre-generated daily digest message in the Building Announcements channel:
+**Where**: Personal chat with the agent → start a voice call
+
+1. Call connects — agent joins via LiveKit (Deepgram STT → Claude → ElevenLabs TTS)
+2. Agent greets: *"Welcome to Frontier Tower! I'm the building concierge."*
+3. Say: *"I just moved to floor 7. I work on robotics and computer vision."*
+4. Agent responds conversationally, asks about interests
+5. Say: *"Can you add me to the events channel?"*
+6. Agent uses MCP tools during the call to add member to channel
+7. **Show**: Orchestra UI updates in real-time — member added
+
+**What judges see**: Natural voice conversation with real-time workspace actions. ElevenLabs voice quality. LiveKit infrastructure.
+
+---
+
+## Scenario 4: Pre-built — Daily Digest (~30 sec)
+
+**Show**: A pre-generated scheduled digest message in the announcements channel:
 
 ```
-📊 Frontier Tower Daily Digest — March 14, 2026
+📊 Frontier Tower Daily Digest — March 15, 2026
 
 🆕 Activity
-- 12 tasks created across 6 floors
-- 4 tasks completed
+- 8 tasks created across 4 floors
 - 3 new residents joined
 
 💬 Active Discussions
-- Floor 5: Robotics lab equipment sharing (15 messages)
-- Governance: Parking allocation proposal (8 messages)
-- Events: Friday mixer planning (6 messages)
+- Floor 5: Lab equipment sharing (12 messages)
+- Governance: Parking proposal (6 messages)
 
 📅 Upcoming
 - Friday Mixer — Floor 1 Common Area, 6pm
-- Governance Vote: Common area renovation closes Sunday
 ```
 
-**Demonstrates**: Activity summary, scheduled triggers, cross-floor visibility
+Explain: *"This is generated on a schedule trigger — the agent reads activity across all channels and projects, summarizes it, and posts daily."*
 
 ---
 
 ## Scenario 5: On-chain Identity (~30 sec)
 
-1. **Show**: Solana Explorer with the agent's registered identity
-2. Point out:
-   - MPL Core asset with AgentIdentity plugin
-   - Agent registration document (name, description, MCP endpoint)
-   - PDA wallet address
-3. Explain: *"The agent has an on-chain identity on Solana via Metaplex. This enables verifiable agent identity, discoverability, and future payment capabilities for premium concierge services."*
+**Option A** (if Metaplex registration done):
+1. Show Solana Explorer with the agent's MPL Core asset
+2. Point out: agent name, MCP endpoint in metadata, PDA wallet
+3. Say: *"The agent has a verifiable on-chain identity via Metaplex Agent Registry"*
 
-**Demonstrates**: Metaplex Agent Registry integration, on-chain identity
+**Option B** (if Solana wallet funded):
+1. Ask agent: *"What's the building treasury balance?"*
+2. Agent calls `check_balance`, returns devnet SOL amount
+3. Say: *"The agent manages a Solana wallet for building governance — bounties, proposals, community funds"*
+
+---
+
+## Key Talking Points
+
+- **Orchestra provides**: Agent identity, 40+ MCP tools, session management, trigger system, workspace data
+- **External engine**: Agent runs anywhere (Railway), connects back to Orchestra via MCP
+- **No tool duplication**: Agent discovers tools dynamically from MCP at runtime
+- **Voice + Text**: Same agent, same tools, different interface — voice via LiveKit + ElevenLabs, text via streaming webhook
+- **JWT-scoped auth**: Agent gets a short-lived token scoped to the workspace, no stored credentials
