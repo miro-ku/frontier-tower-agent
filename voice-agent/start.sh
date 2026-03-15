@@ -1,7 +1,7 @@
 #!/bin/bash
 # Start Unbrowse server in background
 echo "[start] Starting Unbrowse server..."
-unbrowse setup --skip-browser &
+echo "y" | unbrowse setup --skip-browser &
 sleep 5
 
 # Start the Python voice agent worker
