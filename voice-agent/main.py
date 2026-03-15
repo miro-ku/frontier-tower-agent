@@ -333,7 +333,17 @@ async def handle_meeting_join(payload: dict[str, Any]) -> None:
     # Create voice agent with tools
     class VoiceAgent(Agent):
         def __init__(self):
-            super().__init__(instructions=instructions + VOICE_RULES)
+            super().__init__(
+                instructions=instructions + VOICE_RULES,
+                stt=elevenlabs.STT(),
+                llm=anthropic_lk.LLM(model="claude-sonnet-4-20250514", temperature=0.8),
+                tts=elevenlabs.TTS(
+                    voice_id=os.environ.get("ELEVENLABS_VOICE_ID", "ODq5zmih8GrVes37Dizd"),
+                    model="eleven_turbo_v2_5",
+                ),
+                vad=silero.VAD.load(),
+                chat_ctx=chat_ctx,
+            )
 
         @function_tool()
         async def search_members(self, ctx: RunContext, query: str = "") -> str:
@@ -363,16 +373,7 @@ async def handle_meeting_join(payload: dict[str, Any]) -> None:
             """Transfer SOL from the building treasury."""
             return await solana_tools.transfer_sol(to_address, amount, memo)
 
-    session = AgentSession(
-        stt=elevenlabs.STT(),
-        llm=anthropic_lk.LLM(model="claude-sonnet-4-20250514", temperature=0.8),
-        tts=elevenlabs.TTS(
-            voice_id=os.environ.get("ELEVENLABS_VOICE_ID", "ODq5zmih8GrVes37Dizd"),
-            model="eleven_turbo_v2_5",
-        ),
-        vad=silero.VAD.load(),
-        chat_ctx=chat_ctx,
-    )
+    session = AgentSession()
 
     room = rtc.Room()
     await room.connect(livekit_url, token.to_jwt())
