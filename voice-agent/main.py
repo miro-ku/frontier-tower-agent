@@ -101,15 +101,15 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
             {"name": "get_wallet_address", "description": "Get the building treasury wallet address", "input_schema": {"type": "object", "properties": {}}},
         ])
 
-    # Add Unbrowse tools (web abilities via MCP subprocess)
+    # Add Unbrowse tools (web abilities via local HTTP API)
     unbrowse = UnbrowseClient()
     try:
         if await unbrowse.start():
-            unbrowse_tools = await unbrowse.list_tools()
+            unbrowse_tools = unbrowse.get_tools()
             tools.extend(unbrowse_tools)
-            print(f"[text] Discovered {len(unbrowse_tools)} Unbrowse tools")
+            print(f"[text] Added {len(unbrowse_tools)} Unbrowse tools")
     except Exception as e:
-        print(f"[text] Failed to start Unbrowse: {e}")
+        print(f"[text] Failed to connect to Unbrowse: {e}")
 
     # Tool loop with streaming
     response_text = ""
