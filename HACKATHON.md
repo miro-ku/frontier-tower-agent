@@ -1,0 +1,166 @@
+# Hackathon Status — Intelligence at the Frontier
+
+**Event**: Intelligence at the Frontier Hackathon, SF
+**Submission deadline**: March 15, 2026
+**Repo**: https://github.com/miro-ku/frontier-tower-agent
+
+---
+
+## Prize Tracks
+
+| Track | Status | What We Built |
+|-------|--------|---------------|
+| **Frontier Tower Agent** (primary) | Code done | Conversational agent for 16-floor building coordination |
+| **ElevenLabs Voice** | Code done | Voice calls via LiveKit + Deepgram STT + ElevenLabs TTS |
+| **Metaplex Agent Registry** | Code done, not run | On-chain agent identity + Solana wallet |
+| **Unbrowse** | Config only | Orchestra's External Tools supports Direct MCP — no code needed |
+| **human.tech** | Skipped | Would need Human Passport integration |
+
+---
+
+## What's Built
+
+### Orchestra Repo (feat/hack branch) — 10 commits
+
+| Commit | Description |
+|--------|-------------|
+| `fea1a58` | Poll tools (AI SDK + MCP): createPoll, getPollResults, votePoll, closePoll |
+| `cbbcc3f` | Poll UI (MessagePoll.vue) + SDK votePoll with atomic arrayUnion/arrayRemove |
+| `5ec7428` | LiveKit agent token endpoint (getAgentLiveKitToken) |
+| `7197490` | External agent engine — webhook dispatch with full session context |
+| `60f1bea` | Voice engine setting (ai_agent_voice_engine) + meeting join trigger for personal chats |
+| `5c1d87b` | MCP passthrough in webhook payload + update_ai_message tool for response streaming |
+| `645e49a` | Agent config UI: external engine fields, voice engine selector, Voice Call trigger |
+| `a14fca1` | Review fixes: atomic votes, message auth check, server-side MCP key |
+| `803fbce` | Server-generated JWT auth for external engine MCP access |
+| `9480756` | Hide integrations config for external engine agents |
+| `16cd9b5` | Error logging in executeUnified catch block |
+
+### External Repo (frontier-tower-agent) — 6 commits
+
+| Component | Files | Purpose |
+|-----------|-------|---------|
+| Voice Agent | `voice-agent/main.py` | Webhook server: receives triggers from Orchestra, handles text (Claude + MCP tools + streaming) and voice (LiveKit + STT + TTS) |
+| MCP Client | `voice-agent/orchestra_client.py` | HTTP client for Orchestra MCP, authenticates via x-functions-auth JWT |
+| Solana Tools | `voice-agent/solana_tools.py` | check_balance, transfer_sol, get_wallet_address |
+| Metaplex | `solana/register-agent.ts` | On-chain agent registration script |
+| Metaplex | `solana/agent-registration.json` | Agent metadata (ERC-8004 standard) |
+| Prompts | `prompts/text-prompt.md` | Full agent instructions for Orchestra |
+| Prompts | `prompts/voice-prompt.md` | Condensed voice interaction rules |
+| Docs | `docs/architecture.md` | System architecture |
+| Docs | `docs/demo-script.md` | 5 demo scenarios |
+| Docs | `docs/unbrowse-setup.md` | Unbrowse integration guide |
+
+---
+
+## Architecture
+
+```
+Text @mention / DM ──► Orchestra trigger system ──► External engine webhook
+Schedule trigger   ──►     (builds session context:     ──► Voice Agent Worker
+Voice call         ──►      history, memories, prompt)       │
+                                                             ├── Text: Claude LLM + MCP tools
+                                                             │   → streams response to chat
+                                                             ├── Voice: joins LiveKit room
+                                                             │   → Deepgram STT → Claude → ElevenLabs TTS
+                                                             └── Solana: wallet management
+                                                                 → treasury, bounties, governance
+
+Orchestra provides:              Voice Worker provides:
+├── Agent identity               ├── LLM execution (Claude)
+├── Session context & memory     ├── STT (Deepgram)
+├── Trigger system               ├── TTS (ElevenLabs)
+├── MCP tools (40+)              ├── Audio I/O (LiveKit)
+├── Execution tracking           ├── Solana wallet
+└── Workspace data               └── Webhook server
+```
+
+---
+
+## TODO Before Submission
+
+### Must Do
+- [ ] **Fix assistant bug** — deploy with error logging commit, check what's actually failing
+- [ ] **Push external repo** — latest commits with JWT auth
+- [ ] **Set up demo workspace** — 16 floor projects, channels, sample residents with descriptions
+- [ ] **Test text agent** — @mention, polls, resource matching
+- [ ] **Test voice agent** — run worker locally + tunnel, start call in personal chat
+- [ ] **Run Metaplex registration** — fund devnet wallet, upload metadata to Arweave, run script
+- [ ] **Record demo video** — backup for judges
+- [ ] **Submit to DevSpot**
+
+### Nice to Have
+- [ ] Register on frontier.human.tech (human.tech bonus track)
+- [ ] Configure Unbrowse as Direct MCP Application
+- [ ] Set up Solana devnet wallet with test SOL
+
+---
+
+## Demo Scenarios
+
+1. **Voice Onboarding** (~2 min): Call agent → welcome, interest discovery, add to channels
+2. **Building Poll** (~1 min): "Vote on furniture?" → poll created → vote in UI → results
+3. **Resource Matching** (~1 min): "Need ML expert" → search profiles → introduce
+4. **Daily Digest** (scheduled): Activity summary + external events
+5. **On-chain Identity** (~30 sec): Show Metaplex registration on Solana Explorer
+
+---
+
+## How to Run
+
+### Voice Agent Worker
+```bash
+cd voice-agent
+pip install -r requirements.txt
+cp .env.example .env.local
+# Fill in: LIVEKIT_*, ANTHROPIC_API_KEY, DEEPGRAM_API_KEY, ELEVEN_API_KEY
+# MCP credentials come from Orchestra webhook payload (auto)
+python main.py
+```
+
+### Metaplex Registration
+```bash
+cd solana
+npm install
+# Upload agent-registration.json to Arweave first
+AGENT_REGISTRATION_URI=https://arweave.net/... npm run register
+```
+
+### Orchestra Agent Setup
+1. Create agent blueprint in Orchestra
+2. Set engine to "External", enter webhook URL
+3. Set voice engine to "External", enter voice webhook URL
+4. Enable triggers: mention, Voice Call
+5. Deploy the agent
+
+---
+
+## Key Environment Variables
+
+### Voice Worker (.env.local)
+```
+LIVEKIT_URL=wss://...
+LIVEKIT_API_KEY=...
+LIVEKIT_API_SECRET=...
+ANTHROPIC_API_KEY=sk-ant-...
+DEEPGRAM_API_KEY=...
+ELEVEN_API_KEY=sk_...
+ELEVENLABS_VOICE_ID=ODq5zmih8GrVes37Dizd
+WEBHOOK_PORT=8765
+SOLANA_RPC_URL=https://api.devnet.solana.com
+SOLANA_PRIVATE_KEY=[...]
+```
+
+### Orchestra Cloud Functions
+```
+MCP_SERVER_URL=https://...cloudfunctions.net/mcpServer
+FUNCTIONS_JWT_SECRET=... (already set, used for JWT generation)
+```
+
+---
+
+## Known Issues
+
+1. **Assistant bug** — thinking message created but empty, execution returns success:false with 0 steps. Error logging added in commit `16cd9b5` but not yet deployed to identify root cause. Likely introduced in commit `2714b80fd` (file attachment support in session context).
+
+2. **Emulator project mismatch** — local dev requires `.firebaserc` development alias to match the web app's projectId. Fixed by pointing development → orchestra-ai-test-2.
