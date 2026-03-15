@@ -31,6 +31,20 @@ import solana_tools
 
 load_dotenv(".env.local")
 
+import re
+
+def clean_response_text(text: str) -> str:
+    """Strip XML function call blocks and other artifacts from response text."""
+    # Remove <functioncalls>...</functioncalls> blocks
+    text = re.sub(r'<functioncalls>.*?</functioncalls>', '', text, flags=re.DOTALL)
+    # Remove <invoke>...</invoke> blocks
+    text = re.sub(r'<invoke\b.*?</invoke>', '', text, flags=re.DOTALL)
+    # Remove <function_calls>...</function_calls> blocks
+    text = re.sub(r'<function_calls>.*?</function_calls>', '', text, flags=re.DOTALL)
+    # Clean up excessive whitespace
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
 VOICE_RULES = """
 
 ## Voice Interaction Rules
@@ -141,7 +155,7 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
         text_blocks = [b for b in response.content if b.type == "text"]
 
         if text_blocks:
-            response_text = text_blocks[-1].text
+            response_text = clean_response_text(text_blocks[-1].text)
 
         if not tool_uses or response.stop_reason == "end_turn":
             break
@@ -188,7 +202,7 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
         ) as stream:
             async for text in stream.text_stream:
                 response_text += text
-                yield json.dumps({"type": "chunk", "text": response_text}) + "\n"
+                yield json.dumps({"type": "chunk", "text": clean_response_text(response_text)}) + "\n"
 
             final = await stream.get_final_message()
             total_input += final.usage.input_tokens
@@ -217,7 +231,7 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
                 total_output += final_resp.usage.output_tokens
                 for block in final_resp.content:
                     if block.type == "text":
-                        response_text = block.text
+                        response_text = clean_response_text(block.text)
                 yield json.dumps({"type": "chunk", "text": response_text}) + "\n"
 
     # Yield final result
