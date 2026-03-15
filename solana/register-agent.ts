@@ -19,7 +19,8 @@ import {
   createCollectionV1,
   createV1,
 } from '@metaplex-foundation/mpl-core';
-import { registerIdentityV1 } from '@metaplex-foundation/mpl-agent-registry';
+import { registerIdentityV1 } from '@metaplex-foundation/mpl-agent-registry/dist/src/generated/identity';
+import { mplAgentIdentity } from '@metaplex-foundation/mpl-agent-registry';
 
 const CLUSTER_URL = process.env.SOLANA_RPC_URL || 'https://api.devnet.solana.com';
 const REGISTRATION_URI = process.env.AGENT_REGISTRATION_URI || '';
@@ -41,6 +42,7 @@ async function main() {
   const keypairData = JSON.parse(fs.readFileSync(keypairPath, 'utf-8'));
   const keypair = umi.eddsa.createKeypairFromSecretKey(new Uint8Array(keypairData));
   umi.use(keypairIdentity(keypair));
+  umi.use(mplAgentIdentity());
 
   console.log('Wallet:', keypair.publicKey.toString());
 
@@ -62,6 +64,7 @@ async function main() {
     collection: collectionSigner.publicKey,
     name: 'Frontier Tower Concierge',
     uri: REGISTRATION_URI,
+    plugins: [],
   }).sendAndConfirm(umi);
   console.log('Agent asset:', assetSigner.publicKey.toString());
 

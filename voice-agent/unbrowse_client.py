@@ -98,7 +98,7 @@ class UnbrowseClient:
         try:
             payload: dict[str, Any] = {"intent": intent}
             if url:
-                payload["url"] = url
+                payload["context"] = {"url": url}
 
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
