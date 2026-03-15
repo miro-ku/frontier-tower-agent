@@ -32,6 +32,53 @@ class OrchestraClient:
         self.user_uid = user_uid or os.environ.get("ORCHESTRA_USER_UID", "")
         self._request_id = 0
 
+    async def list_tools(self) -> list[dict[str, Any]]:
+        """List available MCP tools from the Orchestra server."""
+        self._request_id += 1
+
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "tools/list",
+            "params": {},
+            "id": f"req-{self._request_id}",
+            "_context": {
+                "spaceUid": self.space_uid,
+                "userUid": self.user_uid,
+            },
+        }
+
+        headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "x-space-uid": self.space_uid,
+        }
+        if self.auth_token:
+            headers["x-functions-auth"] = self.auth_token
+        elif self.api_key:
+            headers["x-api-key"] = self.api_key
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                self.endpoint,
+                json=payload,
+                headers=headers,
+            )
+            response.raise_for_status()
+            result = response.json()
+
+        if "error" in result:
+            raise Exception(f"MCP error: {result['error']}")
+
+        tools = result.get("result", {}).get("tools", [])
+        # Convert MCP tool format to Anthropic tool format
+        return [
+            {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "input_schema": t.get("inputSchema", {"type": "object", "properties": {}}),
+            }
+            for t in tools
+        ]
+
     async def call_tool(self, tool_name: str, params: dict[str, Any]) -> Any:
         """Call an MCP tool on the Orchestra server."""
         self._request_id += 1
@@ -59,6 +106,8 @@ class OrchestraClient:
             headers["x-functions-auth"] = self.auth_token
         elif self.api_key:
             headers["x-api-key"] = self.api_key
+
+        print(f"[mcp] Calling {tool_name} at {self.endpoint} (auth_token={'set' if self.auth_token else 'empty'}, space={self.space_uid})")
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(

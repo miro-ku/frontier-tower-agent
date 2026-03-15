@@ -80,7 +80,7 @@ Orchestra provides:              Voice Worker provides:
 ## TODO Before Submission
 
 ### Must Do
-- [ ] **Fix assistant bug** — deploy with error logging commit, check what's actually failing
+- [x] **Fix assistant bug** — unified error handling and thinking message lifecycle
 - [ ] **Push external repo** — latest commits with JWT auth
 - [ ] **Set up demo workspace** — 16 floor projects, channels, sample residents with descriptions
 - [ ] **Test text agent** — @mention, polls, resource matching
@@ -161,6 +161,6 @@ FUNCTIONS_JWT_SECRET=... (already set, used for JWT generation)
 
 ## Known Issues
 
-1. **Assistant bug** — thinking message created but empty, execution returns success:false with 0 steps. Error logging added in commit `16cd9b5` but not yet deployed to identify root cause. Likely introduced in commit `2714b80fd` (file attachment support in session context).
+1. ~~**Assistant bug**~~ — Fixed. Thinking message lifecycle and error handling unified.
 
 2. **Emulator project mismatch** — local dev requires `.firebaserc` development alias to match the web app's projectId. Fixed by pointing development → orchestra-ai-test-2.

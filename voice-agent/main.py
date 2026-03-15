@@ -64,152 +64,63 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
     # Build messages from Orchestra's session history
+    # Orchestra sends pre-formatted { role, content } messages
     messages = []
     for msg in history:
         content = msg.get("content", "")
         if not content:
             continue
-        is_ai = msg.get("isAiMessage", False) or msg.get("senderType") == "ai"
         messages.append({
-            "role": "assistant" if is_ai else "user",
+            "role": msg.get("role", "user"),
             "content": content,
         })
 
     if not messages:
         messages = [{"role": "user", "content": "(Scheduled trigger — no user message)"}]
 
-    # Create thinking message for streaming
-    thinking_msg = await orchestra.send_message(
-        origin_chat_uid,
-        "",
-    )
-    message_uid = thinking_msg.get("uid", "") if isinstance(thinking_msg, dict) else ""
-
-    # Define Solana tools for function calling
-    tools = [
-        {
-            "name": "check_balance",
-            "description": "Check the agent's Solana wallet SOL balance",
-            "input_schema": {"type": "object", "properties": {}},
-        },
-        {
-            "name": "transfer_sol",
-            "description": "Transfer SOL from the agent wallet to a recipient address",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "to_address": {"type": "string", "description": "Recipient Solana address"},
-                    "amount": {"type": "number", "description": "Amount in SOL"},
-                    "memo": {"type": "string", "description": "Transaction memo"},
-                },
-                "required": ["to_address", "amount"],
-            },
-        },
-        {
-            "name": "get_wallet_address",
-            "description": "Get the agent's Solana wallet public address",
-            "input_schema": {"type": "object", "properties": {}},
-        },
-    ]
-
-    # Also define key MCP tools as Anthropic function tools
-    mcp_tools = [
-        {
-            "name": "search_members",
-            "description": "Search for workspace members by name, skills, or description",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "filter": {"type": "string", "description": "Filter: members, bots, all"},
-                },
-            },
-        },
-        {
-            "name": "create_poll",
-            "description": "Create a poll in a chat for residents to vote on",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "chatUid": {"type": "string"},
-                    "question": {"type": "string"},
-                    "options": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["chatUid", "question", "options"],
-            },
-        },
-        {
-            "name": "get_poll_results",
-            "description": "Get current results of a poll",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "messageUid": {"type": "string"},
-                    "chatUid": {"type": "string"},
-                },
-                "required": ["messageUid", "chatUid"],
-            },
-        },
-        {
-            "name": "search_entities",
-            "description": "Search for tasks, projects, documents by name",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "types": {"type": "array", "items": {"type": "string"}},
-                },
-                "required": ["query"],
-            },
-        },
-        {
-            "name": "create_entity",
-            "description": "Create a task, project, or document",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "entities": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "type": {"type": "string"},
-                                "name": {"type": "string"},
-                                "contextUid": {"type": "string"},
-                                "description": {"type": "string"},
-                            },
-                            "required": ["type", "name"],
-                        },
-                    },
-                },
-                "required": ["entities"],
-            },
-        },
-    ]
-
     import anthropic
     client = anthropic.AsyncAnthropic()
 
-    all_tools = tools + mcp_tools
+    # Discover tools dynamically from MCP
+    tools = []
+    if mcp_info.get("endpoint"):
+        try:
+            tools = await orchestra.list_tools()
+            print(f"[text] Discovered {len(tools)} MCP tools")
+        except Exception as e:
+            print(f"[text] Failed to discover tools: {e}")
+            tools = []
+
+    # Add Solana tools (executed locally, not via MCP)
+    if os.environ.get("SOLANA_PRIVATE_KEY") or os.environ.get("SOLANA_KEYPAIR_PATH"):
+        tools.extend([
+            {"name": "check_balance", "description": "Check building treasury SOL balance", "input_schema": {"type": "object", "properties": {}}},
+            {"name": "transfer_sol", "description": "Transfer SOL from the building treasury", "input_schema": {"type": "object", "properties": {"to_address": {"type": "string"}, "amount": {"type": "number"}, "memo": {"type": "string"}}, "required": ["to_address", "amount"]}},
+            {"name": "get_wallet_address", "description": "Get the building treasury wallet address", "input_schema": {"type": "object", "properties": {}}},
+        ])
+
+    # Tool loop with streaming
     response_text = ""
     total_input = 0
     total_output = 0
     steps = 0
-
-    # Tool loop
     current_messages = messages.copy()
-    while True:
+
+    while steps < 15:
         steps += 1
+
+        # Try streaming first, fall back to non-streaming if tools are called
         response = await client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=2048,
             system=instructions,
             messages=current_messages,
-            tools=all_tools,
+            tools=tools if mcp_info.get("endpoint") else [],
         )
         total_input += response.usage.input_tokens
         total_output += response.usage.output_tokens
 
-        # Check for tool calls
+        # Extract text and tool calls
         tool_uses = [b for b in response.content if b.type == "tool_use"]
         text_blocks = [b for b in response.content if b.type == "text"]
 
@@ -219,90 +130,105 @@ async def handle_text_trigger(payload: dict[str, Any]) -> dict[str, Any]:
         if not tool_uses or response.stop_reason == "end_turn":
             break
 
-        # Execute tool calls
+        # Execute tool calls via MCP
         current_messages.append({"role": "assistant", "content": response.content})
         tool_results = []
 
         for tool_use in tool_uses:
-            result = await execute_tool(tool_use.name, tool_use.input, orchestra)
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": tool_use.id,
-                "content": str(result),
-            })
+            try:
+                result = await execute_tool(tool_use.name, tool_use.input, orchestra)
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use.id,
+                    "content": json.dumps(result) if not isinstance(result, str) else result,
+                })
+            except Exception as e:
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use.id,
+                    "content": f"Tool error: {e}",
+                    "is_error": True,
+                })
 
         current_messages.append({"role": "user", "content": tool_results})
 
-        # Stream intermediate text if available
-        if message_uid and response_text:
-            try:
-                await orchestra.call_tool("update_ai_message", {
-                    "chatUid": origin_chat_uid,
-                    "messageUid": message_uid,
-                    "content": response_text,
-                    "isGenerating": True,
-                })
-            except Exception as e:
-                print(f"[text] Streaming update failed: {e}")
+        # Yield intermediate text
+        if response_text:
+            yield json.dumps({"type": "chunk", "text": response_text}) + "\n"
 
-        if steps >= 15:
-            break
+    # Now stream the final response if we haven't yet
+    # (If we went through tool loop, do one final streaming call)
+    if steps > 1 and response_text:
+        yield json.dumps({"type": "chunk", "text": response_text}) + "\n"
+    elif steps == 1:
+        # Single call — stream it
+        response_text = ""
+        async with client.messages.stream(
+            model="claude-sonnet-4-20250514",
+            max_tokens=2048,
+            system=instructions,
+            messages=current_messages,
+            tools=tools if mcp_info.get("endpoint") else [],
+        ) as stream:
+            async for text in stream.text_stream:
+                response_text += text
+                yield json.dumps({"type": "chunk", "text": response_text}) + "\n"
 
-    # Final update — stop generating indicator
-    if message_uid and response_text:
-        try:
-            await orchestra.call_tool("update_ai_message", {
-                "chatUid": origin_chat_uid,
-                "messageUid": message_uid,
-                "content": response_text,
-                "isGenerating": False,
-            })
-        except Exception as e:
-            print(f"[text] Final update failed: {e}")
+            final = await stream.get_final_message()
+            total_input += final.usage.input_tokens
+            total_output += final.usage.output_tokens
 
-    return {
+            # Check if stream ended with tool use
+            tool_uses = [b for b in final.content if b.type == "tool_use"]
+            if tool_uses:
+                # Fall back to non-streaming tool loop
+                current_messages.append({"role": "assistant", "content": final.content})
+                for tool_use in tool_uses:
+                    try:
+                        result = await execute_tool(tool_use.name, tool_use.input, orchestra)
+                        current_messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use.id, "content": json.dumps(result) if not isinstance(result, str) else result}]})
+                    except Exception as e:
+                        current_messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use.id, "content": f"Tool error: {e}", "is_error": True}]})
+
+                # Get final text response after tool use
+                final_resp = await client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=2048,
+                    system=instructions,
+                    messages=current_messages,
+                )
+                total_input += final_resp.usage.input_tokens
+                total_output += final_resp.usage.output_tokens
+                for block in final_resp.content:
+                    if block.type == "text":
+                        response_text = block.text
+                yield json.dumps({"type": "chunk", "text": response_text}) + "\n"
+
+    # Yield final result
+    yield json.dumps({
+        "type": "result",
         "success": True,
         "stepsCount": steps,
         "tokensInput": total_input,
         "tokensOutput": total_output,
         "responseText": response_text,
-    }
+    }) + "\n"
 
 
-async def execute_tool(name: str, args: dict[str, Any], orchestra: OrchestraClient) -> str:
-    """Execute a tool call — routes to Solana tools or Orchestra MCP."""
-    try:
-        # Solana tools (local)
-        if name == "check_balance":
-            return await solana_tools.check_balance()
-        elif name == "transfer_sol":
-            return await solana_tools.transfer_sol(
-                args["to_address"], args["amount"], args.get("memo", "")
-            )
-        elif name == "get_wallet_address":
-            return await solana_tools.get_wallet_address()
-        # MCP tools (proxied to Orchestra)
-        elif name == "search_members":
-            return str(await orchestra.get_members(**args))
-        elif name == "create_poll":
-            return str(await orchestra.create_poll(
-                args["chatUid"], args["question"], args["options"]
-            ))
-        elif name == "get_poll_results":
-            return str(await orchestra.get_poll_results(
-                args["messageUid"], args["chatUid"]
-            ))
-        elif name == "search_entities":
-            return str(await orchestra.search_entities(
-                args["query"], args.get("types")
-            ))
-        elif name == "create_entity":
-            return str(await orchestra.create_entity(args["entities"]))
-        else:
-            # Try calling as generic MCP tool
-            return str(await orchestra.call_tool(name, args))
-    except Exception as e:
-        return f"Tool error: {e}"
+async def execute_tool(name: str, args: dict[str, Any], orchestra: OrchestraClient) -> Any:
+    """Execute a tool call — routes Solana tools locally, everything else to MCP."""
+    # Solana tools (local)
+    if name == "check_balance":
+        return await solana_tools.check_balance()
+    elif name == "transfer_sol":
+        return await solana_tools.transfer_sol(
+            args["to_address"], args["amount"], args.get("memo", "")
+        )
+    elif name == "get_wallet_address":
+        return await solana_tools.get_wallet_address()
+    # All other tools via MCP
+    else:
+        return await orchestra.call_tool(name, args)
 
 
 # ---------------------------------------------------------------------------
@@ -448,8 +374,28 @@ async def handle_webhook(request: web.Request) -> web.Response:
         asyncio.create_task(handle_meeting_join(payload))
         return web.json_response({"success": True, "stepsCount": 0, "tokensInput": 0, "tokensOutput": 0})
     elif trigger_type in ("mention", "message_in_chat", "message_in_project", "schedule", "personal_chat", "reply"):
-        result = await handle_text_trigger(payload)
-        return web.json_response(result)
+        try:
+            response = web.StreamResponse(
+                status=200,
+                headers={"Content-Type": "application/x-ndjson"},
+            )
+            await response.prepare(request)
+
+            async for chunk in handle_text_trigger(payload):
+                await response.write(chunk.encode())
+
+            await response.write_eof()
+            return response
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return web.json_response({
+                "success": False,
+                "stepsCount": 0,
+                "tokensInput": 0,
+                "tokensOutput": 0,
+                "errorMessage": str(e),
+            })
     else:
         return web.json_response({"error": f"Unsupported trigger: {trigger_type}"}, status=400)
 
