@@ -319,16 +319,16 @@ async def handle_meeting_join(payload: dict[str, Any]) -> None:
     )
 
     # Build chat context from history
-    chat_ctx = anthropic_lk.llm.ChatContext()
+    from livekit.agents import llm
+    chat_ctx = llm.ChatContext()
     for msg in history:
         content = msg.get("content", "")
         if not content:
             continue
-        is_ai = msg.get("isAiMessage", False) or msg.get("senderType") == "ai"
-        chat_ctx = chat_ctx.append(
-            role="assistant" if is_ai else "user",
-            text=content,
-        )
+        role = msg.get("role", "user")
+        if role == "model":
+            role = "assistant"
+        chat_ctx.add_message(role=role, content=content)
 
     # Create voice agent with tools
     class VoiceAgent(Agent):
